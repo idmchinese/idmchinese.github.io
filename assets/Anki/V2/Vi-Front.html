@@ -1,0 +1,926 @@
+<script>
+    /**
+     * Anki TTS
+     * https://github.com/krmanik/anki-tts
+     * krmanki
+     * MIT
+     */
+    function createStyle() {
+        let style = `
+#ttsConfigContainer {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: rgba(0, 0, 0, 0.35) 0px 8px 18px;
+    z-index: 99999999999;
+    width: 448px;
+    padding: 14px;
+    text-align: left;
+}`;
+
+        let styleElement = document.createElement("style");
+        styleElement.innerHTML = style;
+        document.head.appendChild(styleElement);
+    }
+
+    function createElement(tag, attributes, text, parent) {
+        var element = document.getElementById(attributes.id);
+
+        if (element) {
+            return element;
+        }
+
+        var element = document.createElement(tag);
+        for (var key in attributes) {
+            if (attributes.hasOwnProperty(key)) {
+                element.setAttribute(key, attributes[key]);
+            }
+        }
+
+        if (text) {
+            element.appendChild(document.createTextNode(text));
+        }
+
+        if (parent) {
+            parent.appendChild(element);
+        }
+
+        return element;
+    }
+
+    function showConfig() {
+        var configDiv = document.getElementById("ttsConfigContainer");
+        configDiv.style.display = (configDiv.style.display === "none") ? "block" : "none";
+
+        if (configDiv.style.display === "block") {
+            setConfig();
+        }
+    }
+
+    var dict = {};
+    function setConfig() {
+        var TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+        var VOICES_URL = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=" + TRUSTED_CLIENT_TOKEN;
+
+        fetch(VOICES_URL).then(function (res) {
+            return res.json();
+        }).then(function (data) {
+            for (var _i = 0, data_1 = data; _i < data_1.length; _i++) {
+                var d = data_1[_i];
+                var l = d.Locale;
+                l = l.split("-")[0] || "default";
+                if (!dict[l]) {
+                    dict[l] = [];
+                }
+                dict[l].push(d);
+            }
+            dict = Object.keys(dict).sort().reduce(function (acc, key) {
+                acc[key] = dict[key];
+                return acc;
+            }, {});
+
+            setLocale();
+        });
+    }
+
+    function setVoice() {
+        var selectedLocale = localeSelect.value;
+        voiceSelect.innerHTML = "";
+
+        for (var _i = 0, _a = dict[selectedLocale]; _i < _a.length; _i++) {
+            var d = _a[_i];
+            var option = document.createElement("option");
+            option.value = d.ShortName;
+            option.text = d.FriendlyName;
+            voiceSelect.add(option);
+        }
+    }
+
+    function setLocale() {
+        var localeSelect = document.getElementById("localeSelect");
+        var voiceSelect = document.getElementById("voiceSelect");
+
+        for (var key in dict) {
+            if (dict.hasOwnProperty(key)) {
+                var option = document.createElement("option");
+                option.value = key;
+                option.text = key + " (" + dict[key][0].FriendlyName.split("-")[1].split("(")[0] + ")";
+                localeSelect.add(option);
+            }
+        }
+
+        setVoice();
+
+        let [ttsLocale, ttsVoice] = getLocal();
+        if (ttsLocale) {
+            localeSelect.value = ttsLocale;
+            setVoice();
+        }
+
+        if (ttsVoice) {
+            voiceSelect.value = ttsVoice;
+        }
+
+        localeSelect.onchange = (e) => {
+            localStorage.setItem("ttsLocale", e.target.value);
+            setVoice();
+        }
+
+        voiceSelect.onchange = (e) => {
+            localStorage.setItem("ttsVoice", e.target.value);
+        }
+    };
+
+    function getLocal() {
+        var ttsLocale = localStorage.getItem("ttsLocale");
+        var ttsVoice = localStorage.getItem("ttsVoice");
+        return [ttsLocale, ttsVoice];
+    }
+
+    function setupEdgeTtsConfig() {
+        var ttsButtonContainer = createElement("div", { id: "ttsButtonContainer" }, null, document.body);
+        createElement("button", { id: "ttsPlayButton", onclick: "playTts()" }, "Play", ttsButtonContainer);
+        createElement("button", { id: "ttsShowConfig", onclick: "showConfig()" }, "Config", ttsButtonContainer);
+
+        var ttsConfigContainer = createElement("div", { id: "ttsConfigContainer", style: "display: none" }, null, document.body);
+        var configDiv = createElement("div", { id: "msttsConfig" }, null, ttsConfigContainer);
+        var configDivLocale = createElement("div", { id: "msttsConfigLocale" }, null, configDiv);
+        createElement("label", { id: "localeSelectLabel", for: "localeSelect" }, "Select Locale ", configDivLocale);
+        createElement("select", { id: "localeSelect" }, null, configDivLocale);
+        var configDivVoice = createElement("div", { id: "msttsConfigVoice" }, null, configDiv);
+        createElement("label", { id: "voiceSelectLabel", for: "voiceSelect" }, "Select Voice ", configDivVoice);
+        createElement("select", { id: "voiceSelect", style: "width: 448px;" }, null, configDivVoice);
+    }
+
+    createStyle();
+    setupEdgeTtsConfig();
+
+    // https://gist.github.com/likev/c36fcc8a08ba1a2c5d08f9c7d806a0ad
+    // JS port of https://github.com/Migushthe2nd/MsEdgeTTS
+
+    socket = null;
+    ttsText = null;
+    ttsWindow = null;
+    ttsError = false;
+    ttsAudio = new Audio("");
+
+    function create_edge_TTS({ voice = "zh-CN-XiaoxiaoNeural", timeout = 10, auto_reconnect = true } = {}) {
+        const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+        const VOICES_URL = `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${TRUSTED_CLIENT_TOKEN}`;
+        const SYNTH_URL = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}`;
+        const BINARY_DELIM = "Path:audio\r\n";
+        const VOICE_LANG_REGEX = /\w{2}-\w{2}/;
+
+        let _outputFormat = "audio-24khz-48kbitrate-mono-mp3";
+        let _voiceLocale = 'zh-CN';
+        let _voice = voice;
+        const _queue = { message: [], url_resolve: {}, url_reject: {} };
+        let ready = false;
+
+        function _SSMLTemplate(input) {
+            return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${_voiceLocale}">
+              <voice name="${_voice}">
+                  ${input}
+              </voice>
+          </speak>`;
+        }
+
+        function uuidv4() {
+            return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c =>
+                (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+            );
+        }
+
+        create_new_ws();
+
+        function setFormat(format) {
+            if (format) {
+                _outputFormat = format;
+            }
+            socket.send(`Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n
+                  {
+                      "context": {
+                          "synthesis": {
+                              "audio": {
+                                  "metadataoptions": {
+                                      "sentenceBoundaryEnabled": "false",
+                                      "wordBoundaryEnabled": "false"
+                                  },
+                                  "outputFormat": "${_outputFormat}" 
+                              }
+                          }
+                      }
+                  }
+              `);
+        }
+
+        async function createURL(requestId) {
+            let index_message = 0;
+            for (let message of _queue.message) {
+                const isbinary = message instanceof Blob;
+
+                if (!isbinary) {
+                    continue;
+                }
+
+                const data = await message.text();
+                const Id = /X-RequestId:(.*?)\r\n/gm.exec(data)[1];
+
+                if (Id !== requestId) {
+                    continue;
+                }
+
+                if (data.charCodeAt(0) === 0x00 && data.charCodeAt(1) === 0x67 && data.charCodeAt(2) === 0x58) {
+                    // Last (empty) audio fragment
+                    const blob = new Blob(_queue[requestId], { 'type': 'audio/mp3' });
+                    _queue[requestId] = null;
+                    const url = URL.createObjectURL(blob);
+                    _queue.url_resolve[requestId](url);
+                } else {
+                    const index = data.indexOf(BINARY_DELIM) + BINARY_DELIM.length;
+                    const audioData = message.slice(index);
+                    _queue[requestId].push(audioData);
+                    _queue.message[index_message] = null;
+                }
+                ++index_message;
+            }
+        }
+
+        function onopen(event) {
+            setFormat();
+            ready = true;
+        }
+
+        async function onmessage(event) {
+            const isbinary = event.data instanceof Blob;
+            _queue.message.push(event.data)
+            if (!isbinary) {
+                const requestId = /X-RequestId:(.*?)\r\n/gm.exec(event.data)[1];
+                if (event.data.includes("Path:turn.end")) {
+                    createURL(requestId);
+                }
+            }
+        }
+
+        function onerror(event) {
+            ready = false;
+        }
+
+        function onclose(event) {
+            ready = false;
+        }
+
+        function addSocketListeners() {
+            socket.addEventListener('open', onopen);
+            socket.addEventListener('message', onmessage);
+            socket.addEventListener('error', onerror);
+            socket.addEventListener('close', onclose);
+        }
+
+        function create_new_ws() {
+            try {
+                if (ttsError) {
+                    return;
+                }
+
+                socket = new WebSocket(SYNTH_URL);
+
+                socket.onerror = function (event) {
+                    ttsError = true;
+                }
+
+                addSocketListeners();
+            } catch (e) {
+                console.log(e);
+            }
+        }
+
+        let toStream = function (input) {
+            let requestSSML = _SSMLTemplate(input);
+            const requestId = uuidv4().replaceAll('-', '');
+            const request = `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n` + requestSSML.trim();
+
+            _queue[requestId] = [];
+
+            return new Promise((resolve, reject) => {
+                _queue.url_resolve[requestId] = resolve, _queue.url_reject[requestId] = reject;
+
+                if (!ready) {
+                    if (auto_reconnect) {
+                        create_new_ws();
+                        socket.addEventListener('open', _ => socket.send(request));
+
+                        setTimeout(_ => { if (!ready) reject('reconnect timeout') }, timeout * 1000);
+                    }
+                    else reject('socket error or timeout');
+                } else {
+                    socket.send(request)
+                }
+            });
+        }
+
+        async function play(input) {
+            const url = await toStream(input);
+            let play_resolve = function () { };
+            ttsAudio.src = url;
+            ttsAudio.onended = (e) => {
+                play_resolve(true);
+            }
+            await ttsAudio.play();
+            return new Promise((resolve, reject) => {
+                play_resolve = resolve
+            });
+        }
+
+        return new Promise((resolve, reject) => {
+            setTimeout(_ => reject('socket open timeout'), timeout * 1000);
+            // Connection opened
+            socket.addEventListener('open', function (event) {
+                resolve({
+                    play,
+                    toStream,
+                    setVoice: (voice, locale) => {
+                        _voice = voice;
+                        if (!locale) {
+                            const voiceLangMatch = VOICE_LANG_REGEX.exec(_voice);
+                            if (!voiceLangMatch) {
+                                throw new Error("Could not infer voiceLocale from voiceName!");
+                            }
+                            _voiceLocale = voiceLangMatch[0];
+                        } else {
+                            _voiceLocale = locale;
+                        }
+                    },
+                    setFormat,
+                    isReady: _ => ready
+                })
+            });
+        });
+    }
+
+    async function edgeTtsPlay(text, voice = "zh-CN-XiaoxiaoNeural") {
+        if (text === undefined || text === null || text === '') {
+            return;
+        }
+
+        ttsError = false;
+        if (ttsError) {
+            return;
+        }
+
+        ttsText = text;
+        const tts = await create_edge_TTS({ voice });
+
+        try {
+            await tts.play(text);
+        } catch (e) {
+            ttsError = true;
+            console.log(e);
+        }
+    }
+</script>
+
+<!-- ICON CARD------------------------------------------------------>
+<style>
+    :where(.i-heroicons\:arrow-right-end-on-rectangle-20-solid) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' width='20' height='20'%3E%3Cg fill='black' fill-rule='evenodd' clip-rule='evenodd'%3E%3Cpath d='M17 4.25A2.25 2.25 0 0 0 14.75 2h-5.5A2.25 2.25 0 0 0 7 4.25v2a.75.75 0 0 0 1.5 0v-2a.75.75 0 0 1 .75-.75h5.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-.75.75h-5.5a.75.75 0 0 1-.75-.75v-2a.75.75 0 0 0-1.5 0v2A2.25 2.25 0 0 0 9.25 18h5.5A2.25 2.25 0 0 0 17 15.75z'/%3E%3Cpath d='M1 10a.75.75 0 0 1 .75-.75h9.546l-1.048-.943a.75.75 0 1 1 1.004-1.114l2.5 2.25a.75.75 0 0 1 0 1.114l-2.5 2.25a.75.75 0 1 1-1.004-1.114l1.048-.943H1.75A.75.75 0 0 1 1 10'/%3E%3C/g%3E%3C/svg%3E")
+    }
+</style>
+<style>
+    :where(.i-heroicons\:star) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.56.56 0 0 0 .475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.56.56 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.56.56 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.56.56 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.56.56 0 0 0 .475-.345z'/%3E%3C/svg%3E")
+    }
+</style>
+<style>
+    :where(.i-heroicons\:list) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z'/%3E%3C/svg%3E")
+    }
+</style>
+<style>
+    :where(.i-heroicons\:code) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5'/%3E%3C/svg%3E")
+    }
+</style>
+<style>
+    :where(.i-heroicons\:image) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z'/%3E%3C/svg%3E")
+    }
+</style>
+<style>
+    :where(.i-heroicons\:eye) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='24' height='24'%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z'/%3E%3Cpath fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z'/%3E%3C/svg%3E")
+    }
+
+    :where(.i-heroicons\:eye) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z'/%3E%3Cpath fill='black' fill-rule='evenodd' d='M1.323 11.447C2.811 6.976 7.028 3.75 12.001 3.75c4.97 0 9.185 3.223 10.675 7.69.12.362.12.752 0 1.113-1.487 4.471-5.705 7.697-10.677 7.697-4.97 0-9.186-3.223-10.675-7.69a1.762 1.762 0 0 1 0-1.113ZM17.25 12a5.25 5.25 0 1 1-10.5 0 5.25 5.25 0 0 1 10.5 0Z' clip-rule='evenodd'/%3E%3C/svg%3E")
+    }
+
+    :where(.i-heroicons\:eye-slash) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' width='20' height='20'%3E%3Cg fill='black'%3E%3Cpath fill-rule='evenodd' d='M3.28 2.22a.75.75 0 0 0-1.06 1.06l14.5 14.5a.75.75 0 1 0 1.06-1.06l-1.745-1.745a10.03 10.03 0 0 0 3.3-4.38a1.65 1.65 0 0 0 0-1.185A10 10 0 0 0 9.999 3a9.96 9.96 0 0 0-4.744 1.194zm4.472 4.47l1.092 1.092a2.5 2.5 0 0 1 3.374 3.373l1.091 1.092A4 4 0 0 0 7.752 6.69' clip-rule='evenodd'/%3E%3Cpath d='m10.748 13.93l2.523 2.523a10 10 0 0 1-3.27.547c-4.258 0-7.894-2.66-9.337-6.41a1.65 1.65 0 0 1 0-1.186A10 10 0 0 1 2.839 6.02L6.07 9.252Q6 9.616 6 10a4 4 0 0 0 4.748 3.93'/%3E%3C/g%3E%3C/svg%3E")
+    }
+
+    :where(.i-heroicons\:speaker-wave) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' width='16' height='16'%3E%3Cpath fill='black' d='M7.557 2.066A.75.75 0 0 1 8 2.75v10.5a.75.75 0 0 1-1.248.56L3.59 11H2a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h1.59l3.162-2.81a.75.75 0 0 1 .805-.124m5.393.984a.75.75 0 1 0-1.06 1.06a5.5 5.5 0 0 1 0 7.78a.75.75 0 1 0 1.06 1.06a7 7 0 0 0 0-9.9'/%3E%3Cpath fill='black' d='M10.828 5.172a.75.75 0 1 0-1.06 1.06a2.5 2.5 0 0 1 0 3.536a.75.75 0 1 0 1.06 1.06a4 4 0 0 0 0-5.656'/%3E%3C/svg%3E")
+    }
+
+    :where(.i-heroicons\:photo) {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        background-color: currentColor;
+        -webkit-mask-image: var(--svg);
+        mask-image: var(--svg);
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%;
+        mask-size: 100% 100%;
+        --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' fill-rule='evenodd' d='M1.5 6a2.25 2.25 0 0 1 2.25-2.25h16.5A2.25 2.25 0 0 1 22.5 6v12a2.25 2.25 0 0 1-2.25 2.25H3.75A2.25 2.25 0 0 1 1.5 18V6ZM3 16.06V18c0 .414.336.75.75.75h16.5A.75.75 0 0 0 21 18v-1.94l-2.69-2.689a1.5 1.5 0 0 0-2.12 0l-.88.879.97.97a.75.75 0 1 1-1.06 1.06l-5.16-5.159a1.5 1.5 0 0 0-2.12 0L3 16.061Zm10.125-7.81a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Z' clip-rule='evenodd'/%3E%3C/svg%3E")
+    }
+</style>
+
+<!-- HTML CARD------------------------------------------------------>
+<div class="hide linkfield">{{Link}}</div>
+<div class="hide" id="examplesField">{{Examples}}</div>
+
+<div class="prettify-flashcard">
+    <div class="flex">
+        <div class="prettify-deck">{{Deck}}<span class="">{{#Pos}}::【{{Pos}}】{{/Pos}}</span></div>
+        <div class="flex">
+            <span id="btnEditMode" onclick="myToggleHide('editMode', 'btnEditMode')"
+                class="iconify i-heroicons:code back hide" aria-hidden="true"></span>
+            {{#More}}<span id="bttMore" onclick="myToggleHide('more', 'bttMore')" class="iconify i-heroicons:list back"
+                aria-hidden="true"></span>{{/More}}
+            <span id="bttCC" onclick="myToggleHide('noDefine', 'bttCC')" class="iconify i-heroicons:eye"
+                aria-hidden="true"></span>
+            <span id="bttHanzi" onclick="imgHanzi()" class="iconify i-heroicons:photo back"></span>
+            <span class="iconify i-heroicons:speaker-wave back" onclick="playTtsFirst('zh-CN-YunyangNeural')"></span>
+        </div>
+    </div>
+    <div class="prettify-field">
+        <div onclick="myKhaiThu(this)" id="frontField" class="title back">{{Front}}</div>
+        <div class="back hide">{{Vietnamese}}</div>
+        <div class="sub back">{{Pinyin}}</div>
+    </div>
+
+    {{#Examples}}
+    <div class="prettify-field" id="examples"></div>
+    {{/Examples}}
+
+    <div class="back">
+        <hr class="prettify-divider prettify-divider--answer" id="answer" />
+        <div class="prettify-field prettify-field--back">
+            <div>{{Vietnamese}}</div>
+            <div class="sub">{{Definitions}}</div>
+        </div>
+
+        <div class="hide hanzi" id="hanzi">
+            <hr class="prettify-divider prettify-divider--answer" />
+            <div class="prettify-field prettify-field--back left">{{Hanzi}}</div>
+            <div id="imgHanziField"></div>
+        </div>
+
+        {{#More}}
+        <div class="hide more" id="more">
+            <hr class="prettify-divider prettify-divider--answer" />
+            <div class="prettify-field prettify-field--back left">{{More}}</div>
+        </div>
+        {{/More}}
+    </div>
+
+    {{#Tags}}
+    <div class="prettify-tags">{{clickable:Tags}}</div>
+    {{/Tags}}
+</div>
+
+<div>{{type:Front}}</div>
+<div id="editMode" class="hide">{{edit:Examples}}</div>
+
+<script>
+    // Split hierarchical tags
+    function generateTags() {
+        var tagsContainerEl = document.querySelectorAll(".prettify-tags > *");
+        if (tagsContainerEl.length > 0) {
+            var tags = [];
+            tagsContainerEl.forEach((tagEl) => {
+                tagEl.classList.add("prettify-tag");
+                tags.push(tagEl.innerHTML);
+                tags.forEach((tag) => {
+                    var childTag = tag.split("::").filter(Boolean);
+                    tagEl.innerHTML = childTag[childTag.length - 1].trim();
+                });
+            });
+        } else {
+            tagsContainerEl = document.querySelector(".prettify-tags");
+            if (`{{Tags}}` == "") {
+            }
+            else {
+                var tags = tagsContainerEl.innerHTML.split(" ").filter(Boolean);
+                var html = "";
+                tags.forEach((tag) => {
+                    var childTag = tag.split("::").filter(Boolean);
+
+                    if (tag == "Obsidian") {
+                        if (document.querySelector('div.linkfield a.obsidian-link') != null) {
+                            html = "<span class='prettify-tag'>" + "<a href='" + document.querySelector('div.linkfield a.obsidian-link').href + "'>Obsidian</a></span>" + html;
+                        }
+                    } else {
+                        html +=
+                            "<span class='prettify-tag'>" +
+                            childTag[childTag.length - 1] +
+                            "</span>";
+                    };
+                });
+                tagsContainerEl.innerHTML = html;
+            }
+        }
+    }
+
+    // Breadcrumbs to current deck
+    function generateDeck() {
+        var deckEl = document.querySelector(".prettify-deck");
+        var subDecks = deckEl.innerHTML.split("::").filter(Boolean);
+        html = [];
+        subDecks.forEach((subDeck) => {
+            html.push("<span class='prettify-subdeck'>" + subDeck + "</span>");
+        });
+        deckEl.innerHTML = html.join("&nbsp;/&nbsp;");
+    }
+</script>
+
+<script>
+    function myToggleHide(idElement, idBtt) {
+        var btt = document.getElementById(idBtt);
+        if (idBtt == "bttCC") {
+            var listItems = document.querySelectorAll('.vi-example');
+            listItems.forEach((item, index) => {
+                item.classList.toggle("hide");
+            });
+        } else {
+            var element = document.getElementById(idElement);
+            element.classList.toggle("hide");
+        }
+        btt.classList.toggle("on-mode");
+
+        if (idElement === 'editMode') {
+            editMode = 1 - editMode;
+        }
+
+        if (idElement === 'hanzi') {
+            hanzi = 1 - hanzi;
+        }
+    }
+
+    function myKhaiThu(text) {
+        text.classList.toggle("khai-thu");
+    }
+</script>
+
+<script>
+    function myExamples(hideKeyWord = 0) {
+        let examplesField = document.getElementById('examplesField');
+        if (examplesField.innerHTML != "") {
+            // Lấy danh sách các <li>
+            let listItems = examplesField.querySelectorAll('ul li');
+
+            if (listItems.length != 0) {
+                var outputDiv = document.getElementById('examples');
+                var html = "";
+                // Duyệt qua từng <li> và tạo cấu trúc thẻ div
+                listItems.forEach((item, index) => {
+                    // Tách nội dung bằng '<br>'
+                    var parts = item.innerHTML.split('<br>').map(part => part.trim());
+
+                    if (hideKeyWord === 2) {
+                        html += "<div class='example' id='" + `id${index + 1}` + "'><div class='zh-example' onclick='playTts(this)'><div class='zh-example-view hide cc'>" + parts[0] + "</div><div class='zh-example-origin' style='display: none;''>" + parts[0] + "</div></div><div class='vi-example sub'>" + parts[1] + "</div></div>";
+
+                    } else {
+                        html += "<div class='example' id='" + `id${index + 1}` + "'><div class='zh-example' onclick='playTts(this)'><div class='zh-example-view'>" + parts[0] + "</div><div class='zh-example-origin' style='display: none;''>" + parts[0] + "</div></div><div class='vi-example sub hide cc'>" + parts[1] + "</div></div>";
+                    }
+                });
+
+                outputDiv.innerHTML = html;
+                typeEx = 1;
+
+                if (hideKeyWord != 0) {
+                    let strongElements = outputDiv.querySelectorAll('div.zh-example-view strong');
+                    strongElements.forEach(strong => {
+                        strong.textContent = '___';
+                    });
+                }
+            } else {
+                var outputDiv = document.getElementById('examples');
+                var html = "";
+                let listItems = examplesField.innerHTML.split('|');
+                // Các ví dụ cách nhau bởi |
+                listItems.forEach((item, index) => {
+                    // Tách nội dung bằng '<br>'
+                    var parts = item.split('<br>').map(part => part.trim());
+
+                    if (hideKeyWord === 2) {
+                        html += "<div class='example' id='" + `id${index + 1}` + "'><div class='zh-example' onclick='playTts(this)'><div class='zh-example-view hide cc'>" + parts[0] + "</div><div class='zh-example-origin' style='display: none;''>" + parts[0] + "</div></div><div class='vi-example sub'>" + parts[1] + "</div></div>";
+
+                    } else {
+                        html += "<div class='example' id='" + `id${index + 1}` + "'><div class='zh-example' onclick='playTts(this)'><div class='zh-example-view'>" + parts[0] + "</div><div class='zh-example-origin' style='display: none;''>" + parts[0] + "</div></div><div class='vi-example sub hide cc'>" + parts[1] + "</div></div>";
+                    }
+                });
+
+                outputDiv.innerHTML = html;
+                typeEx = 2;
+
+                if (hideKeyWord != 0) {
+                    let strongElements = outputDiv.querySelectorAll('div.zh-example-view strong, div.zh-example-view b');
+                    strongElements.forEach(strong => {
+                        strong.textContent = '___';
+                    });
+                }
+
+            }
+        }
+    }
+
+    function playTtsFirst(voice) {
+        var textTTS = document.getElementById('frontField').innerText;
+        if (typeEx !== 0) {
+            textTTS += "。" + document.getElementsByClassName("zh-example-origin")[0].innerText;
+        }
+        edgeTtsPlay(textTTS, listVoice[0]);
+        switchVoice();
+
+    }
+
+    function playTts(text) {
+        let textTTS = text.getElementsByClassName("zh-example-origin")[0].innerText;
+        edgeTtsPlay(textTTS, listVoice[0]);
+        switchVoice();
+    }
+
+    function imgHanzi() {
+        let str = `{{Front}}`;
+        let html = ""
+        for (let char of str) {
+            html += "<img src='https://raw.githubusercontent.com/idmchinese/idmchinese.github.io/refs/heads/main/assets/hanzi/1000/" + char + ".jpeg' onerror='this.src=\"https://raw.githubusercontent.com/idmchinese/idmchinese.github.io/refs/heads/main/assets/hanzi/naver/" + char + ".jpg\"'>";
+        }
+        document.getElementById('imgHanziField').innerHTML = html;
+        myToggleHide('hanzi', 'bttHanzi');
+    }
+
+    function switchVoice() {
+        listVoice.push(listVoice.shift()); // Dịch chuyển phần tử đầu xuống cuối
+    }
+
+    function hideBack() {
+        document.querySelectorAll(".back").forEach(back => {
+            back.classList.toggle("hide");
+        });
+    }
+
+    // 0 không có ví dụ, 1 ví dụ dạng list, 2 ví dụ dạng text
+    var typeEx = 0;
+    var listVoice = ['zh-CN-XiaoxiaoNeural', 'zh-CN-YunyangNeural'];
+
+    generateDeck();
+    generateTags();
+    hideBack();
+    myExamples(2);
+
+    if (typeof editMode === "undefined") {
+        var editMode = 0;
+    } else if (editMode === 1) {
+        editMode = 0;
+        myToggleHide('editMode', 'btnEditMode');
+    }
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+<script>
+    const CSV_FILE = "_hanzi.csv"; // File CSV cùng thư mục
+    let dictionary = {};
+
+    function loadCSV(callback) { // Nhận callback để chạy sau khi tải xong
+        fetch(CSV_FILE)
+            .then(response => response.text())
+            .then(csvText => {
+                Papa.parse(csvText, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: function (result) {
+                        dictionary = {};
+                        result.data.forEach(row => {
+                            if (row.hanzi) {
+                                const hanzi = row.hanzi.trim();
+                                dictionary[hanzi] = {
+                                    huashuo: row.huashuo || "",
+                                    naver: row.naver || "",
+                                    huashuo_vi: row.huashuo_vi || "",
+                                    naver_vi: row.naver_vi || ""
+                                };
+                            }
+                        });
+                        console.log("Tải từ điển thành công!", dictionary);
+                        if (callback) callback(); // Chạy callback khi tải xong
+                    }
+                });
+            })
+            .catch(error => console.error("Lỗi tải CSV:", error));
+    }
+
+    function imageExists(url, callback) {
+        let img = new Image();
+        img.src = url;
+        img.onload = () => callback(true, url);
+        img.onerror = () => callback(false, url);
+    }
+
+    function displayImages(word, callback) {
+        const folders = [
+            'https://raw.githubusercontent.com/idmchinese/idmchinese.github.io/main/assets/hanzi/huashuohanzi',
+            'https://raw.githubusercontent.com/idmchinese/idmchinese.github.io/main/assets/hanzi/naver'
+        ];
+
+        let imagesHTML = "";
+        let checkCount = 0;
+
+        folders.forEach(folder => {
+            let imageUrl = `${folder}/${word}.jpg`;
+            imageExists(imageUrl, (exists, url) => {
+                if (exists) {
+                    imagesHTML += `<img src="${url}">`;
+                }
+                checkCount++;
+                if (checkCount === folders.length) {
+                    callback(imagesHTML);
+                }
+            });
+        });
+    }
+
+    // Tìm kiếm nhiều từ vựng
+    function searchWords(mode = 0) {
+        // const inputText = document.getElementById("searchWords").value.trim();
+        // const words = inputText.split(",").map(word => word.trim());
+        // const words = Array.from(`{{Front}}`);;
+        // const resultDiv = document.getElementById("hanzi");
+
+        // Xác định từ cần tìm và vùng hiển thị kết quả
+        let words = [];
+        let resultDiv = null;
+
+        if (mode === 0) {
+            const inputField = document.getElementById("frontField").innerText.trim();
+            var preWords = Array.from(inputField); // Chuyển chuỗi thành mảng ký tự
+            words = [...new Set(preWords)]; // Bỏ ký từ trùng lặp
+            // words = Array.from(`{{Front}}`); // Trường hợp cố định
+            resultDiv = document.getElementById("hanzi"); // Hiển thị ở vùng hanzi
+        } else if (mode === 1) {
+            const inputText = document.getElementById("searchWords").value.trim();
+            var preWords = Array.from(inputText); // Chuyển chuỗi thành mảng ký tự
+            words = [...new Set(preWords)]; // Bỏ ký từ trùng lặp
+            resultDiv = document.getElementById("resultHanzi"); // Hiển thị ở vùng hanzi2
+        }
+
+        let outputHTML = "";
+        let wordsProcessed = 0;
+
+        words.forEach(word => {
+            if (word in dictionary) {
+                if (dictionary[word].huashuo_vi) {
+                    let entryHTML = `
+                    <hr class="prettify-divider prettify-divider--answer"/>
+                    <div>
+                        <p class="prettify-field prettify-field--back left"><strong>${word}:</strong> ${dictionary[word].huashuo_vi}</p>
+                        <div id="images-${word}"></div>
+                    </div>`;
+
+                    outputHTML += entryHTML;
+
+                    displayImages(word, (imagesHTML) => {
+                        document.getElementById(`images-${word}`).innerHTML = imagesHTML;
+                    });
+                } else if (dictionary[word].naver_vi) {
+                    let entryHTML = `
+                    <hr class="prettify-divider prettify-divider--answer"/>
+                    <div>
+                        <p class="prettify-field prettify-field--back left"><strong>${word}:</strong> ${dictionary[word].naver_vi}</p>
+                        <div id="images-${word}"></div>
+                    </div>`;
+
+                    outputHTML += entryHTML;
+
+                    displayImages(word, (imagesHTML) => {
+                        document.getElementById(`images-${word}`).innerHTML = imagesHTML;
+                    });
+                }
+
+            } else {
+                let entryHTML = `
+                    <hr class="prettify-divider prettify-divider--answer"/>
+                    <div>
+                        <p class="prettify-field prettify-field--back left"><strong>${word}:</strong> Chưa cập nhật...</p>
+                        <div id="images-${word}"></div>
+                    </div>`;
+
+                outputHTML += entryHTML;
+
+                displayImages(word, (imagesHTML) => {
+                    document.getElementById(`images-${word}`).innerHTML = imagesHTML;
+                });
+            }
+
+            wordsProcessed++;
+            if (wordsProcessed === words.length) {
+                resultDiv.innerHTML = outputHTML;
+            }
+        });
+    }
+    loadCSV();
+</script>
